@@ -1,0 +1,319 @@
+---
+title: "mouse-schizo-peget"
+author: "Daniel Acker"
+date: "2/10/2018"
+output: html_document
+---
+
+# Synposis
+
+Skene, Roy, and Grant (2017) quantified gene expression across the lifespan. They found that Schizophrenia-associated genes were enriched for turning points around the time of peak genetic change in humans. This was quantified using a novel metric called the PeGeT score. I am interested in whether the PeGeT scores of the mouse homologs of these Schizophrenia-associated genes are enriched as well. To test this, I will use a resampling proceedure in which PeGeT scores for Schizophrenia-associated genes are paired with random PeGeT scores. Both random and observed score lists will be sorted so that the quantiles of the two lists are aligned. Based on the following preliminary analysis, PeGeT scores of Schizophrenia-associated genes in two orthogonal gene lists appear to be enriched in the mouse. Future analysis will include controls for transcript length.
+
+## Random Seed
+
+```{r}
+set.seed(782872)
+```
+
+## Libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(magrittr)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(reshape2)
+library(sqldf)
+library(readxl)
+library(scales)
+library(ggplot2)
+library(cowplot)
+```
+
+## Aquiring Data
+
+Define a convenience function to show the top two rows of a data frame
+
+```{r}
+print_top = function(df) head(df, 2) %>% print()
+```
+
+Load lists of disease associated genes
+
+```{r, message=FALSE, warning=FALSE}
+df_disease = read_excel("elife-17915-supp1-v1.xlsx", sheet=6) %T>% print_top()
+```
+
+Load PeGeT scores by gene
+
+```{r, message=FALSE, warning=FALSE}
+df_peget = read_excel("elife-17915-supp1-v1.xlsx", sheet=2) %T>% print_top()
+```
+
+## Resampling
+
+Define a list of genes to evaluate
+
+```{r}
+schiz_vector = df_disease$`Schizophrenia (Combined)` %>% {.[!is.na(.)]}
+```
+
+Define a function to identify Schizophrenia genes
+
+```{r}
+is_schiz = function(gene, schiz_vector) {
+  tolower(gene) %in% tolower(schiz_vector)
+}
+```
+
+Label Schizophrenia genes
+
+```{r}
+df_schiz = 
+  df_peget %>%
+  rowwise() %>%
+  mutate(Schiz=ifelse(is_schiz(Gene_symbol, schiz_vector), "Schiz", "Non-Schiz")) %>%
+  ungroup()
+```
+
+Grab the relevant variables for resampling
+
+```{r}
+df_schiz %<>% select(score, Schiz, Gene_symbol)
+```
+
+Define a function to resample the PeGeT scores and align the resamples with the equivalent quantiles of the original list of scores
+
+```{r}
+permuted_score_matrix = 
+  replicate(100, sample(df_schiz$score, replace=T)) %>%
+  {.[df_schiz$Schiz=="Schiz", ]} %>%
+  apply(2, sort, na.last=T, decreasing=T)
+
+df_permutations =
+  permuted_score_matrix %>%
+  as.data.frame() %>%
+  mutate(Original_score={
+    df_schiz$score[df_schiz$Schiz=="Schiz"] %>%
+      sort(na.last=T, decreasing=T)
+  }) %>%
+  gather(Permutation, Permuted_score, -Original_score) %T>%
+  print_top()
+```
+
+Plot PeGeT scores versus resampled PeGeT scores
+
+```{r, message=FALSE, warning=FALSE}
+df_permutations %>%
+  ggplot(aes(Permuted_score, Original_score)) +
+  geom_abline(slope=1, intercept=0, color="red") +
+  geom_point(size=.2, alpha=.5) +
+  coord_equal() +
+  xlim(0, NA) +
+  ylim(0, NA) +
+  labs(x="Random PeGeT score", y="PeGeT score")
+```
+
+## Combined Pipeline
+
+Define a function that performs the above analysis for arbitrary gene lists and numbers of resamples
+
+```{r}
+bootstrap = function(df_peget, schiz_vector, n_resamples=100) {
+  df_schiz = 
+    df_peget %>%
+    rowwise() %>%
+    mutate(Schiz=ifelse(is_schiz(Gene_symbol, schiz_vector), "Schiz", "Non-Schiz")) %>%
+    ungroup() %>% 
+    select(score, Schiz, Gene_symbol)
+  
+  permuted_score_matrix = 
+    replicate(n_resamples, sample(df_schiz$score, replace=T)) %>%
+    {.[df_schiz$Schiz=="Schiz", ]} %>%
+    apply(2, sort, na.last=T, decreasing=T)
+  
+  df_permutations =
+    permuted_score_matrix %>%
+    as.data.frame() %>%
+    mutate(Original_score={
+      df_schiz$score[df_schiz$Schiz=="Schiz"] %>%
+        sort(na.last=T, decreasing=T)
+    }) %>%
+    gather(Permutation, Permuted_score, -Original_score)
+  
+  df_permutations
+}
+```
+
+Apply pipeline across all gene lists
+
+```{r, message=FALSE, warning=FALSE}
+schiz_vector_combined = df_disease$`Schizophrenia (Combined)` %>% {.[!is.na(.)]}
+schiz_vector_integrative = df_disease$`Schizophrenia (Integrative)` %>% {.[!is.na(.)]}
+schiz_vector_denovo = df_disease$`Schizophrenia (De Novo)` %>% {.[!is.na(.)]}
+schiz_vector_gwas = df_disease$`Schizophrenia (GWAS)` %>% {.[!is.na(.)]}
+
+df_boot_combined = 
+  bootstrap(df_peget, schiz_vector_combined) %>% 
+  mutate(List="combined")
+df_boot_integrative = 
+  bootstrap(df_peget, schiz_vector_integrative) %>% 
+  mutate(List="integrative")
+df_boot_denovo = 
+  bootstrap(df_peget, schiz_vector_denovo) %>% 
+  mutate(List="de novo")
+df_boot_gwas = 
+  bootstrap(df_peget, schiz_vector_gwas) %>%
+  mutate(List="GWAS")
+
+df_bootstraps = bind_rows(
+  df_boot_combined, 
+  df_boot_integrative, 
+  df_boot_denovo, 
+  df_boot_gwas
+  )
+```
+
+Plot results for all gene lists
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df_bootstraps, aes(Permuted_score, Original_score)) +
+  facet_grid(~List) +
+  geom_abline(slope=1, intercept=0, color="red") +
+  geom_point(size=.2, alpha=.5) +
+  coord_equal() +
+  xlim(0, NA) +
+  ylim(0, NA) +
+  xlab("Random list PeGeT score") +
+  ylab("List PeGeT score")
+```
+
+## Statistics
+
+To check if the Schizophrenia-associated mouse genes show significantly enriched PeGeT scores, I will generate 10000 bootstrapped samples as described above, then calculate 95% confidence intervals for the difference in sample means from the original distribution.
+
+```{r}
+n_resamples = 10000
+
+df_boot_combined = 
+  bootstrap(df_peget, schiz_vector_combined, n_resamples) %>% 
+  mutate(List="combined")
+df_boot_integrative = 
+  bootstrap(df_peget, schiz_vector_integrative, n_resamples) %>% 
+  mutate(List="integrative")
+df_boot_denovo = 
+  bootstrap(df_peget, schiz_vector_denovo, n_resamples) %>% 
+  mutate(List="de novo")
+df_boot_gwas = 
+  bootstrap(df_peget, schiz_vector_gwas, n_resamples) %>%
+  mutate(List="GWAS")
+
+df_bootstraps = bind_rows(
+  df_boot_combined, 
+  df_boot_integrative, 
+  df_boot_denovo, 
+  df_boot_gwas
+  )
+
+df_mean_deltas = 
+  df_bootstraps %>%
+  mutate(Delta=Original_score-Permuted_score) %>%
+  group_by(List, Permutation) %>%
+  summarise(Mean_delta=mean(Delta, na.rm=T))
+
+df_mean_deltas %>%
+  group_by(List) %>%
+  summarise(
+    q_.025=quantile(Mean_delta, .025),
+    q_.975=quantile(Mean_delta, .975),
+    p=1-sum(Mean_delta>0)/length(Mean_delta)
+  ) %>%
+  mutate(Corrected_p=p*4)
+```
+
+## Validation on human genes
+
+To validate my analysis, I will replicate the analysis that the original authors performed on human genes. However, I will not be controling for transcript length.
+
+```{r, message=FALSE, warning=FALSE}
+df_peget = read_excel("elife-17915-supp1-v1.xlsx", sheet=1)
+df_peget %<>% rename(Gene_symbol=HGNC.symbol)
+
+n_resamples = 10000
+
+df_boot_combined = 
+  bootstrap(df_peget, schiz_vector_combined, n_resamples) %>% 
+  mutate(List="combined")
+df_boot_integrative = 
+  bootstrap(df_peget, schiz_vector_integrative, n_resamples) %>% 
+  mutate(List="integrative")
+df_boot_denovo = 
+  bootstrap(df_peget, schiz_vector_denovo, n_resamples) %>% 
+  mutate(List="de novo")
+df_boot_gwas = 
+  bootstrap(df_peget, schiz_vector_gwas, n_resamples) %>%
+  mutate(List="GWAS")
+
+df_bootstraps = bind_rows(
+  df_boot_combined, 
+  df_boot_integrative, 
+  df_boot_denovo, 
+  df_boot_gwas
+  )
+
+df_mean_deltas = 
+  df_bootstraps %>%
+  mutate(Delta=Original_score-Permuted_score) %>%
+  group_by(List, Permutation) %>%
+  summarise(Mean_delta=mean(Delta, na.rm=T))
+
+df_mean_deltas %>%
+  group_by(List) %>%
+  summarise(
+    q_.025=quantile(Mean_delta, .025),
+    q_.975=quantile(Mean_delta, .975),
+    p=1-sum(Mean_delta>0)/length(Mean_delta)
+  ) %>%
+  mutate(Corrected_p=p*4)
+```
+
+Plot results for all gene lists
+
+```{r, message=FALSE, warning=FALSE}
+schiz_vector_combined = df_disease$`Schizophrenia (Combined)` %>% {.[!is.na(.)]}
+schiz_vector_integrative = df_disease$`Schizophrenia (Integrative)` %>% {.[!is.na(.)]}
+schiz_vector_denovo = df_disease$`Schizophrenia (De Novo)` %>% {.[!is.na(.)]}
+schiz_vector_gwas = df_disease$`Schizophrenia (GWAS)` %>% {.[!is.na(.)]}
+
+df_boot_combined = 
+  bootstrap(df_peget, schiz_vector_combined) %>% 
+  mutate(List="combined")
+df_boot_integrative = 
+  bootstrap(df_peget, schiz_vector_integrative) %>% 
+  mutate(List="integrative")
+df_boot_denovo = 
+  bootstrap(df_peget, schiz_vector_denovo) %>% 
+  mutate(List="de novo")
+df_boot_gwas = 
+  bootstrap(df_peget, schiz_vector_gwas) %>%
+  mutate(List="GWAS")
+
+df_bootstraps = bind_rows(
+  df_boot_combined, 
+  df_boot_integrative, 
+  df_boot_denovo, 
+  df_boot_gwas
+  )
+
+ggplot(df_bootstraps, aes(Permuted_score, Original_score)) +
+  facet_grid(~List) +
+  geom_abline(slope=1, intercept=0, color="red") +
+  geom_point(size=.2, alpha=.5) +
+  coord_equal() +
+  xlim(0, NA) +
+  ylim(0, NA) +
+  xlab("Random list PeGeT score") +
+  ylab("List PeGeT score")
+```
+
+Conclusion: My p values for human genes are larger than those in the original paper; however, this might be explained by the fact that I didn't control for transcript lengths. My plots of PeGeT scores versus random PeGeT scores look very similar to the original authors, perhaps indicating that I correctly replicated their resampling protocol.
